@@ -1,0 +1,183 @@
+<script lang="ts">
+	import { createClient } from '@supabase/supabase-js';
+	import { onMount } from 'svelte';
+	import { access_token } from '$lib/data/stores.js';
+	import { modalStore } from '@skeletonlabs/skeleton';
+	import type { ModalSettings, ModalComponent } from '@skeletonlabs/skeleton';
+	import { goto } from '$app/navigation';
+
+	let refresh_token: string;
+	const updateFrequency = 3000;
+	let noSongHintVisible: boolean = true;
+	let generatorCount = 0;
+	let currImg = '';
+
+	access_token.subscribe((value) => {
+		refresh_token = value;
+		if (refresh_token === '') {
+			goto('/login');
+		}
+	});
+
+	const supabase = createClient(
+		'SUPABASE_URL',
+		'SUPABASE_TOKEN');
+	function spotifyLogout() {
+		signout();
+		generatorCount = 0;
+		goto('/login');
+	}
+	async function signout() {
+		const { error } = await supabase.auth.signOut();
+		access_token.set('');
+	}
+
+	const client_id = 'CLIENT_ID';
+	const client_secret = 'CLIENT_SECRET';
+
+	const basic = btoa(`${client_id}:${client_secret}`);
+	const NOW_PLAYING_ENDPOINT = `https://api.spotify.com/v1/me/player/currently-playing`;
+	const TOKEN_ENDPOINT = `https://accounts.spotify.com/api/token`;
+
+	const getAccessToken = async () => {
+		const response = await fetch(TOKEN_ENDPOINT, {
+			method: 'POST',
+			headers: {
+				Authorization: `Basic ${basic}`,
+				'Content-Type': 'application/x-www-form-urlencoded'
+			},
+			body: new URLSearchParams({
+				grant_type: 'refresh_token',
+				refresh_token
+			})
+		});
+
+		return response.json();
+	};
+	let data: any;
+	$: songName = '';
+	$: artistName = '';
+	$: songFormat = songName.replace(/[^\w\s-]/gi, '');
+	$: artistFormat = artistName.replace(/[^\w\s-]/gi, '');
+	let previousSong: string;
+	let previousArtist: string;
+
+	onMount(async () => {
+		getNowPlaying();
+		var intervalID = window.setInterval(getNowPlaying, updateFrequency);
+	});
+
+	async function getNowPlaying(): Promise<void> {
+		const { access_token } = await getAccessToken();
+
+		const response = await fetch(NOW_PLAYING_ENDPOINT, {
+			headers: {
+				Authorization: `Bearer ${access_token}`
+			}
+		});
+
+		if (response.status === 204) {
+			noSongHintVisible = true;
+		} else {
+			noSongHintVisible = false;
+			data = await response.json();
+			previousSong = songName;
+			previousArtist = artistName;
+			songName = data.item.name;
+			artistName = data.item.artists[0].name;
+			checkSongChange(songName, artistName);
+		}
+	}
+
+	function checkSongChange(song: string, artist: string): void {
+		if (song != previousSong || artist != previousArtist) {
+			if (generatorCount <= 2) {
+				generatorCount++;
+				generateImage(song);
+			} else {
+				triggerAlert();
+			}
+		}
+	}
+
+	let imgUrl: string;
+	async function generateImage(prompt: string) {
+		const encodedParams = new URLSearchParams();
+		encodedParams.append('prompt', prompt);
+		encodedParams.append('guidance', '8');
+		encodedParams.append('height', '320');
+		encodedParams.append('width', '320');
+		encodedParams.append('steps', '20');
+
+		const options = {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/x-www-form-urlencoded',
+				'X-RapidAPI-Key': 'API_KEY',
+				'X-RapidAPI-Host': 'dezgo.p.rapidapi.com'
+			},
+			body: encodedParams
+		};
+
+		var response = await fetch('https://dezgo.p.rapidapi.com/text2image', options);
+		var pngBlob = await response.blob();
+
+		imgUrl = URL.createObjectURL(pngBlob);
+		saveImg(imgUrl);
+	}
+
+	async function saveImg(src: string) {
+		const url = src;
+		const blob = await fetch(url).then((r) => r.blob());
+		await supabase.storage
+			.from('generated-img')
+			.upload(
+				'TestBatch/' +
+					songFormat +
+					'-' +
+					artistFormat +
+					'-' +
+					Math.random().toString(36).substr(2, 5) +
+					'.jpeg',
+				blob
+			);
+	}
+
+	function triggerAlert(): void {
+		const alert: ModalSettings = {
+			type: 'alert',
+			title: 'Limit exceeded!',
+			body: 'This is a project funded by students so we kindly ask you not to abuse the image generator. You can sign out and log in again to receive additional 3 image generations. Thank you for understanding.',
+			buttonTextCancel: 'I understand'
+		};
+		modalStore.trigger(alert);
+	}
+</script>
+
+<svelte:head>
+	<title>Spotify Image Companion - AI + Music + Image</title>
+</svelte:head>
+
+<div class="container h-full mx-auto flex justify-center items-center py-12 px-10 sm:px-24">
+	<div class="text-center">
+		{#if noSongHintVisible}
+			<aside class="alert variant-ghost-primary">
+				<div class="alert-message">
+					<h3>No song playing</h3>
+					<p>Feel free to play something on Spotify.</p>
+				</div>
+			</aside>
+		{:else}
+			<!-- svelte-ignore a11y-img-redundant-alt -->
+			<img
+				src={imgUrl}
+				class="object-center w-80 rounded-lg scale-in-center mx-auto"
+				alt="We are generating an image for you..."
+			/><br />
+			<h2 class="font-bold">{songName}</h2>
+			<h4 class="font-bold">{artistName}</h4>
+		{/if}
+		<br /><br /><br />
+		<button on:click={spotifyLogout}>Sign Out</button>
+	</div>
+</div>
